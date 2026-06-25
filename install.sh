@@ -36,8 +36,12 @@ log "Install dir: $DEST (writable)"
 mkdir -p "$DEST"
 
 if [ -n "$_self" ] && [ -f "$_self/www/index.html" ]; then
-    log "Copying from local clone..."
-    cp -rf "$_self/." "$DEST/"
+    if [ "$_self" = "$DEST" ]; then
+        log "Already running from install dir, skipping copy."
+    else
+        log "Copying from local clone..."
+        cp -rf "$_self/." "$DEST/"
+    fi
 else
     log "Downloading mochawrt..."
     fetch "$REPO_TARBALL" /tmp/mochawrt.tgz || die "download failed"

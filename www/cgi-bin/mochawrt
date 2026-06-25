@@ -1,62 +1,52 @@
 #!/bin/sh
-# mochawrt :: CGI JSON API (uhttpd)
-# Reads everything from /proc + ubus + uci + busybox tools through the compat
-# layer, so it works on real OpenWrt and on Xiaomi vendor forks alike.
-# Endpoints via ?e= :
-#   sys net wifi clients traffic dpi ping   (GET, read-only)
-#   action (POST: do=reboot|wifi_on|wifi_off|svc_restart&name=...)
+# mochawrt :: CGI JSON API v2 (uhttpd)
+# Monitoring + full management + Xiaomi hidden features, over /proc+ubus+uci+nvram+bdata.
+# Read endpoints (GET ?e=): sys cpu net wifi clients traffic dpi
+#   wifi_cfg wan_cfg lan_cfg fwd_list slease_list sys_cfg hidden_cfg docker_ps
+# Write endpoints (POST ?e=): action wifi_set wan_set lan_set fwd_add fwd_del
+#   slease_add slease_del sys_set hidden_set
 SELF="${SCRIPT_FILENAME:-$0}"
 ROOT="$(cd "$(dirname "$SELF")/../.." 2>/dev/null && pwd)"
 [ -f "$ROOT/lib/compat.sh" ] && . "$ROOT/lib/compat.sh" 2>/dev/null
 
 emit(){ printf 'Status: 200 OK\r\nContent-Type: application/json\r\nCache-Control: no-store\r\n\r\n%s' "$1"; }
 esc(){ printf '%s' "$1" | tr -d '\r' | tr '\n\t' '  ' | sed 's/\\/\\\\/g; s/"/\\"/g'; }
-js(){ printf '"%s":"%s"' "$1" "$(esc "$2")"; }   # string field
-jn(){ printf '"%s":%s' "$1" "${2:-0}"; }          # number field (raw)
+js(){ printf '"%s":"%s"' "$1" "$(esc "$2")"; }
+jn(){ printf '"%s":%s' "$1" "${2:-0}"; }
+ucig(){ uci -q get "$1" 2>/dev/null; }
 
 E="$(printf '%s' "${QUERY_STRING:-}" | tr '&' '\n' | sed -n 's/^e=//p' | head -n1)"
-qp(){ printf '%s' "${QUERY_STRING:-}" | tr '&' '\n' | sed -n "s/^$1=//p" | head -n1; }
-
 read_body(){ [ "${REQUEST_METHOD:-GET}" = POST ] && [ -n "${CONTENT_LENGTH:-}" ] && head -c "$CONTENT_LENGTH"; }
-bp(){ read_body 2>/dev/null | tr '&' '\n' | sed -n "s/^$1=//p" | head -n1; }
+BODY="$(read_body 2>/dev/null)"
+ud(){ _d="$(printf '%s' "$1" | sed 's/+/ /g; s/%/\\x/g')"; printf '%b' "$_d"; }
+bp(){ ud "$(printf '%s' "$BODY" | tr '&' '\n' | sed -n "s/^$1=//p" | head -n1)"; }
 
-# ---------------------------------------------------------------- sys
+# ============================== monitoring ==============================
 ep_sys(){
     model="$(compat_model)"; board="$(compat_board)"; soc="$(compat_soc)"
     prof="$(compat_profile)"; vendor="$(compat_vendor)"
     kernel="$(uname -r 2>/dev/null)"; host="$(cat /proc/sys/kernel/hostname 2>/dev/null)"
     fw=""; [ -r /etc/openwrt_release ] && fw="$(. /etc/openwrt_release 2>/dev/null; echo "$DISTRIB_DESCRIPTION")"
-    [ -z "$fw" ] && _has ubus && fw="OpenWrt $(ubus call system board 2>/dev/null | sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' | head -n1)"
     up="$(cut -d. -f1 /proc/uptime 2>/dev/null)"; up="${up:-0}"
     set -- $(cat /proc/loadavg 2>/dev/null); l1="${1:-0}"; l5="${2:-0}"; l15="${3:-0}"
     cores="$(grep -c ^processor /proc/cpuinfo 2>/dev/null)"; cores="${cores:-1}"
     mt="$(sed -n 's/^MemTotal: *\([0-9]*\).*/\1/p' /proc/meminfo)"; mt="${mt:-0}"
     ma="$(sed -n 's/^MemAvailable: *\([0-9]*\).*/\1/p' /proc/meminfo)"
-    if [ -z "$ma" ]; then
-        mf="$(sed -n 's/^MemFree: *\([0-9]*\).*/\1/p' /proc/meminfo)"
-        mc="$(sed -n 's/^Cached: *\([0-9]*\).*/\1/p' /proc/meminfo)"
-        ma=$(( ${mf:-0} + ${mc:-0} ))
-    fi
+    [ -z "$ma" ] && ma=$(( $(sed -n 's/^MemFree: *\([0-9]*\).*/\1/p' /proc/meminfo) + $(sed -n 's/^Cached: *\([0-9]*\).*/\1/p' /proc/meminfo) ))
     used=$(( mt - ${ma:-0} ))
     tm="$(compat_temp_milli)"; tc="null"; [ -n "$tm" ] && tc=$(( tm / 1000 ))
     emit "{$(js model "$model"),$(js board "$board"),$(js soc "$soc"),$(js profile "$prof"),$(jn vendor "$vendor"),$(js kernel "$kernel"),$(js hostname "$host"),$(js firmware "${fw:-OpenWrt}"),$(jn uptime "$up"),\"load\":[$l1,$l5,$l15],$(jn cores "$cores"),$(jn mem_total "$mt"),$(jn mem_used "$used"),$(jn mem_avail "${ma:-0}"),\"temp_c\":$tc}"
 }
-
-# ---------------------------------------------------------------- cpu (1s sample)
 ep_cpu(){
-    read_stat(){ sed -n 's/^cpu  *//p' /proc/stat | head -n1; }
-    a="$(read_stat)"; sleep 1; b="$(read_stat)"
-    set -- $a; ai=0; at=0; for x in "$@"; do at=$((at+x)); done; ai=$((${4:-0}+${5:-0}))
-    set -- $b; bi=0; bt=0; for x in "$@"; do bt=$((bt+x)); done; bi=$((${4:-0}+${5:-0}))
-    dt=$((bt-at)); di=$((bi-ai)); pct=0; [ "$dt" -gt 0 ] && pct=$(( (100*(dt-di))/dt ))
-    emit "{$(jn usage "$pct")}"
+    rs(){ sed -n 's/^cpu  *//p' /proc/stat | head -n1; }
+    a="$(rs)"; sleep 1; b="$(rs)"
+    set -- $a; at=0; for x in "$@"; do at=$((at+x)); done; ai=$((${4:-0}+${5:-0}))
+    set -- $b; bt=0; for x in "$@"; do bt=$((bt+x)); done; bi=$((${4:-0}+${5:-0}))
+    dt=$((bt-at)); di=$((bi-ai)); p=0; [ "$dt" -gt 0 ] && p=$(( (100*(dt-di))/dt )); emit "{$(jn usage "$p")}"
 }
-
-# ---------------------------------------------------------------- net
 ep_net(){
     gw="$(ip route 2>/dev/null | awk '/^default/{print $3; exit}')"
     dns="$(sed -n 's/^nameserver  *//p' /etc/resolv.conf 2>/dev/null | tr '\n' ' ')"
-    [ -z "$dns" ] && [ -r /tmp/resolv.conf.d/resolv.conf.auto ] && dns="$(sed -n 's/^nameserver  *//p' /tmp/resolv.conf.d/resolv.conf.auto | tr '\n' ' ')"
     out=""; first=1
     for d in /sys/class/net/*; do
         n=$(basename "$d"); [ "$n" = lo ] && continue
@@ -69,14 +59,11 @@ ep_net(){
     done
     emit "{$(js gateway "$gw"),$(js dns "$dns"),$(js wan "$(compat_wan_iface)"),$(js lan "$(compat_lan_iface)"),\"ifaces\":[$out]}"
 }
-
-# ---------------------------------------------------------------- wifi
 ep_wifi(){
     out=""; first=1
     for ifc in $(compat_wifi_ifaces); do
-        ssid=""; chan=""; mode=""; sig=""; cl=0
-        if _has iwinfo; then
-            info="$(iwinfo "$ifc" info 2>/dev/null)"
+        ssid=""; chan=""; mode=""; cl=0
+        if _has iwinfo; then info="$(iwinfo "$ifc" info 2>/dev/null)"
             ssid="$(printf '%s' "$info" | sed -n 's/.*ESSID: *"\([^"]*\)".*/\1/p' | head -n1)"
             chan="$(printf '%s' "$info" | sed -n 's/.*Channel: *\([0-9]*\).*/\1/p' | head -n1)"
             mode="$(printf '%s' "$info" | sed -n 's/.*Mode: *\([A-Za-z]*\).*/\1/p' | head -n1)"
@@ -92,60 +79,201 @@ ep_wifi(){
     done
     emit "{\"radios\":[$out]}"
 }
-
-# ---------------------------------------------------------------- clients
 ep_clients(){
     lf="$(compat_leases_file)"; out=""; first=1
-    if [ -r "$lf" ]; then
-        while read -r exp mac ip name rest; do
-            [ -n "$mac" ] || continue
-            row="{$(js mac "$mac"),$(js ip "$ip"),$(js name "${name:-*}"),$(jn expiry "${exp:-0}")}"
-            [ $first = 1 ] && { out="$row"; first=0; } || out="$out,$row"
-        done < "$lf"
-    fi
+    [ -r "$lf" ] && while read -r exp mac ip name rest; do
+        [ -n "$mac" ] || continue
+        row="{$(js mac "$mac"),$(js ip "$ip"),$(js name "${name:-*}"),$(jn expiry "${exp:-0}")}"
+        [ $first = 1 ] && { out="$row"; first=0; } || out="$out,$row"
+    done < "$lf"
     emit "{\"leases\":[$out]}"
 }
-
-# ---------------------------------------------------------------- traffic
 ep_traffic(){
     out=""; first=1
-    while read -r line; do
-        case "$line" in *:*) ;; *) continue;; esac
-        n="${line%%:*}"; n="$(printf '%s' "$n" | tr -d ' ')"; [ "$n" = lo ] && continue
+    while read -r line; do case "$line" in *:*) ;; *) continue;; esac
+        n="$(printf '%s' "${line%%:*}" | tr -d ' ')"; [ "$n" = lo ] && continue
         v="${line#*:}"; set -- $v; rx="$1"; tx="$9"
         row="{$(js name "$n"),$(jn rx "${rx:-0}"),$(jn tx "${tx:-0}")}"
         [ $first = 1 ] && { out="$row"; first=0; } || out="$out,$row"
     done < /proc/net/dev
     emit "{\"t\":$(date +%s 2>/dev/null || echo 0),\"ifaces\":[$out]}"
 }
-
-# ---------------------------------------------------------------- dpi (open-routerich)
 ep_dpi(){
-    yu=0; doh=0; red=0; quic=0; installed=0
+    yu=0; doh=0; red=0; quic=0; inst=0
     command -v opkg >/dev/null 2>&1 && opkg list-installed 2>/dev/null | grep -q '^youtubeUnblock ' && yu=1
     command -v opkg >/dev/null 2>&1 && opkg list-installed 2>/dev/null | grep -q '^https-dns-proxy ' && doh=1
     grep -q '#5056\|#5353\|xbox.com' /etc/config/dhcp 2>/dev/null && red=1
     grep -q 'Block_UDP_443' /etc/config/firewall 2>/dev/null && quic=1
-    { [ "$red" = 1 ] || [ "$quic" = 1 ] || [ "$yu" = 1 ]; } && installed=1
-    emit "{$(jn installed "$installed"),$(jn yu "$yu"),$(jn doh "$doh"),$(jn redirect "$red"),$(jn quic "$quic")}"
+    { [ "$red" = 1 ] || [ "$quic" = 1 ] || [ "$yu" = 1 ]; } && inst=1
+    emit "{$(jn installed "$inst"),$(jn yu "$yu"),$(jn doh "$doh"),$(jn redirect "$red"),$(jn quic "$quic")}"
 }
 
-# ---------------------------------------------------------------- action (POST)
+# ============================== management (read) ==============================
+ep_wifi_cfg(){
+    out=""; first=1; i=0
+    while [ $i -lt 16 ]; do
+        s="wireless.@wifi-iface[$i]"
+        ssid="$(ucig "$s.ssid")"; dev="$(ucig "$s.device")"
+        [ -z "$ssid" ] && [ -z "$dev" ] && { i=$((i+1)); [ $i -gt 8 ] && break; continue; }
+        [ -z "$dev" ] && { i=$((i+1)); continue; }
+        enc="$(ucig "$s.encryption")"; key="$(ucig "$s.key")"; dis="$(ucig "$s.disabled")"
+        net="$(ucig "$s.network")"; chan="$(ucig "wireless.$dev.channel")"; country="$(ucig "wireless.$dev.country")"
+        band="$(ucig "wireless.$dev.hwmode")"
+        row="{$(jn idx "$i"),$(js device "$dev"),$(js ssid "$ssid"),$(js key "$key"),$(js encryption "${enc:-none}"),$(js network "$net"),$(js band "$band"),$(js channel "$chan"),$(js country "$country"),$(jn disabled "${dis:-0}")}"
+        [ $first = 1 ] && { out="$row"; first=0; } || out="$out,$row"
+        i=$((i+1))
+    done
+    emit "{\"ifaces\":[$out]}"
+}
+ep_wan_cfg(){
+    p="$(ucig network.wan.proto)"
+    emit "{$(js proto "${p:-dhcp}"),$(js ipaddr "$(ucig network.wan.ipaddr)"),$(js netmask "$(ucig network.wan.netmask)"),$(js gateway "$(ucig network.wan.gateway)"),$(js dns "$(ucig network.wan.dns)"),$(js username "$(ucig network.wan.username)"),$(js password "$(ucig network.wan.password)"),$(js cur "$(ip -o -4 addr show 2>/dev/null | awk '/ wan| eth0| wan:/{print $4}' | head -n1)")}"
+}
+ep_lan_cfg(){
+    emit "{$(js ipaddr "$(ucig network.lan.ipaddr)"),$(js netmask "$(ucig network.lan.netmask)"),$(js start "$(ucig dhcp.lan.start)"),$(js limit "$(ucig dhcp.lan.limit)"),$(js leasetime "$(ucig dhcp.lan.leasetime)"),$(js ignore "$(ucig dhcp.lan.ignore)")}"
+}
+ep_fwd_list(){
+    out=""; first=1; i=0
+    while [ $i -lt 64 ]; do
+        s="firewall.@redirect[$i]"; nm="$(ucig "$s.name")"; tg="$(ucig "$s.target")"
+        [ -z "$nm" ] && [ -z "$tg" ] && break
+        row="{$(jn idx "$i"),$(js name "$nm"),$(js proto "$(ucig "$s.proto")"),$(js src_dport "$(ucig "$s.src_dport")"),$(js dest_ip "$(ucig "$s.dest_ip")"),$(js dest_port "$(ucig "$s.dest_port")"),$(js target "$tg")}"
+        [ $first = 1 ] && { out="$row"; first=0; } || out="$out,$row"; i=$((i+1))
+    done
+    emit "{\"fwd\":[$out]}"
+}
+ep_slease_list(){
+    out=""; first=1; i=0
+    while [ $i -lt 128 ]; do
+        s="dhcp.@host[$i]"; mac="$(ucig "$s.mac")"; ip="$(ucig "$s.ip")"
+        [ -z "$mac" ] && [ -z "$ip" ] && break
+        row="{$(jn idx "$i"),$(js name "$(ucig "$s.name")"),$(js mac "$mac"),$(js ip "$ip")}"
+        [ $first = 1 ] && { out="$row"; first=0; } || out="$out,$row"; i=$((i+1))
+    done
+    emit "{\"hosts\":[$out]}"
+}
+ep_sys_cfg(){
+    emit "{$(js hostname "$(ucig system.@system[0].hostname)"),$(js timezone "$(ucig system.@system[0].timezone)"),$(js zonename "$(ucig system.@system[0].zonename)")}"
+}
+ep_hidden_cfg(){
+    nv(){ [ -x /usr/sbin/nvram ] && nvram get "$1" 2>/dev/null; }
+    region=""; [ -x /usr/sbin/bdata ] && region="$(bdata get CountryCode 2>/dev/null)"
+    dk=0; dkn=0; [ -x /data/docker/docker ] || command -v docker >/dev/null 2>&1 && { dk=1; dkn="$( (docker ps -q 2>/dev/null || /data/docker/docker ps -q 2>/dev/null) | grep -c . )"; }
+    emit "{$(js uart_en "$(nv uart_en)"),$(js ssh_en "$(nv ssh_en)"),$(js telnet_en "$(nv telnet_en)"),$(js factory_mode "$(nv factory_mode)"),$(js boot_wait "$(nv boot_wait)"),$(js boot_rootfs "$(nv flag_boot_rootfs)"),$(js region "$region"),$(jn has_nvram "$([ -x /usr/sbin/nvram ] && echo 1 || echo 0)"),$(jn has_bdata "$([ -x /usr/sbin/bdata ] && echo 1 || echo 0)"),$(jn docker "$dk"),$(jn containers "${dkn:-0}")}"
+}
+ep_docker_ps(){
+    d=docker; command -v docker >/dev/null 2>&1 || d=/data/docker/docker
+    out="$("$d" ps --format '{{.Names}}|{{.Image}}|{{.Status}}' 2>/dev/null)"
+    rows=""; first=1
+    printf '%s\n' "$out" | while IFS='|' read -r n img st; do
+        [ -n "$n" ] || continue
+        printf '%s{%s,%s,%s}' "$([ $first = 1 ] && echo '' || echo ',')" "$(js name "$n")" "$(js image "$img")" "$(js status "$st")"
+        first=0
+    done > /tmp/.mwdk
+    emit "{\"containers\":[$(cat /tmp/.mwdk 2>/dev/null)]}"; rm -f /tmp/.mwdk
+}
+
+# ============================== management (write) ==============================
+ok(){ emit "{\"ok\":1,\"msg\":\"$1\"}"; }
+no(){ emit "{\"ok\":0,\"msg\":\"$1\"}"; }
+ep_wifi_set(){
+    i="$(bp idx)"; case "$i" in ''|*[!0-9]*) no "bad idx"; return;; esac
+    s="wireless.@wifi-iface[$i]"; [ -n "$(ucig "$s.device")" ] || { no "no such iface"; return; }
+    ss="$(bp ssid)"; ky="$(bp key)"; en="$(bp enc)"; di="$(bp disabled)"
+    [ -n "$ss" ] && uci set "$s.ssid=$ss"
+    [ -n "$en" ] && uci set "$s.encryption=$en"
+    [ "$en" = none ] && uci -q delete "$s.key" || { [ -n "$ky" ] && uci set "$s.key=$ky"; }
+    uci set "$s.disabled=${di:-0}"
+    ch="$(bp channel)"; cc="$(bp country)"; dev="$(ucig "$s.device")"
+    [ -n "$ch" ] && uci set "wireless.$dev.channel=$ch"
+    [ -n "$cc" ] && uci set "wireless.$dev.country=$cc"
+    uci commit wireless
+    ( wifi reload >/dev/null 2>&1 || /sbin/wifi reload >/dev/null 2>&1 || /sbin/wifi >/dev/null 2>&1 ) &
+    ok "wi-fi applied (reloading)"
+}
+ep_wan_set(){
+    p="$(bp proto)"; [ -n "$p" ] || { no "no proto"; return; }
+    uci set network.wan.proto="$p"
+    if [ "$p" = static ]; then
+        uci set network.wan.ipaddr="$(bp ipaddr)"; uci set network.wan.netmask="$(bp netmask)"
+        uci set network.wan.gateway="$(bp gateway)"; dnsv="$(bp dns)"; [ -n "$dnsv" ] && uci set network.wan.dns="$dnsv"
+    elif [ "$p" = pppoe ]; then
+        uci set network.wan.username="$(bp username)"; uci set network.wan.password="$(bp password)"
+        uci -q delete network.wan.ipaddr; uci -q delete network.wan.gateway
+    else
+        for k in ipaddr netmask gateway dns username password; do uci -q delete "network.wan.$k"; done
+    fi
+    uci commit network; ( ifup wan >/dev/null 2>&1 ) & ok "WAN applied (proto=$p)"
+}
+ep_lan_set(){
+    ip="$(bp ipaddr)"; [ -n "$ip" ] && uci set network.lan.ipaddr="$ip"
+    nm="$(bp netmask)"; [ -n "$nm" ] && uci set network.lan.netmask="$nm"
+    st="$(bp start)"; [ -n "$st" ] && uci set dhcp.lan.start="$st"
+    lm="$(bp limit)"; [ -n "$lm" ] && uci set dhcp.lan.limit="$lm"
+    lt="$(bp leasetime)"; [ -n "$lt" ] && uci set dhcp.lan.leasetime="$lt"
+    uci commit network; uci commit dhcp
+    ( /etc/init.d/dnsmasq reload >/dev/null 2>&1; ifup lan >/dev/null 2>&1 ) & ok "LAN applied (admin IP may change)"
+}
+ep_fwd_add(){
+    uci add firewall redirect >/dev/null
+    uci set firewall.@redirect[-1].name="$(bp name)"
+    uci set firewall.@redirect[-1].target=DNAT
+    uci set firewall.@redirect[-1].src=wan
+    uci set firewall.@redirect[-1].dest=lan
+    uci set firewall.@redirect[-1].proto="$(bp proto)"
+    uci set firewall.@redirect[-1].src_dport="$(bp src_dport)"
+    uci set firewall.@redirect[-1].dest_ip="$(bp dest_ip)"
+    uci set firewall.@redirect[-1].dest_port="$(bp dest_port)"
+    uci commit firewall; ( /etc/init.d/firewall reload >/dev/null 2>&1 ) & ok "port-forward added"
+}
+ep_fwd_del(){ i="$(bp idx)"; case "$i" in ''|*[!0-9]*) no "bad idx"; return;; esac
+    uci -q delete "firewall.@redirect[$i]"; uci commit firewall; ( /etc/init.d/firewall reload >/dev/null 2>&1 ) & ok "removed"; }
+ep_slease_add(){
+    uci add dhcp host >/dev/null
+    uci set dhcp.@host[-1].name="$(bp name)"; uci set dhcp.@host[-1].mac="$(bp mac)"; uci set dhcp.@host[-1].ip="$(bp ip)"
+    uci commit dhcp; ( /etc/init.d/dnsmasq reload >/dev/null 2>&1 ) & ok "lease added"
+}
+ep_slease_del(){ i="$(bp idx)"; case "$i" in ''|*[!0-9]*) no "bad idx"; return;; esac
+    uci -q delete "dhcp.@host[$i]"; uci commit dhcp; ( /etc/init.d/dnsmasq reload >/dev/null 2>&1 ) & ok "removed"; }
+ep_sys_set(){
+    hn="$(bp hostname)"; tz="$(bp timezone)"; zn="$(bp zonename)"; pw="$(bp password)"
+    [ -n "$hn" ] && { uci set system.@system[0].hostname="$hn"; echo "$hn" > /proc/sys/kernel/hostname 2>/dev/null; }
+    [ -n "$tz" ] && uci set system.@system[0].timezone="$tz"
+    [ -n "$zn" ] && uci set system.@system[0].zonename="$zn"
+    uci commit system; ( /etc/init.d/system reload >/dev/null 2>&1 ) &
+    if [ -n "$pw" ]; then printf '%s\n%s\n' "$pw" "$pw" | passwd root >/dev/null 2>&1 && ok "system + password updated" || ok "system updated (passwd failed)"; else ok "system updated"; fi
+}
+ep_hidden_set(){
+    f="$(bp flag)"; v="$(bp value)"
+    case "$f" in
+        uart_en|ssh_en|telnet_en|factory_mode|boot_wait)
+            [ -x /usr/sbin/nvram ] || { no "no nvram"; return; }
+            nvram set "$f=$v" && nvram commit && ok "$f=$v (reboot to apply)" || no "nvram failed" ;;
+        region)
+            [ -x /usr/sbin/bdata ] || { no "no bdata"; return; }
+            bdata set "CountryCode=$v" && bdata commit && ok "region=$v (reboot to apply)" || no "bdata failed" ;;
+        *) no "unknown flag" ;;
+    esac
+}
 ep_action(){
-    do_="$(bp do)"
-    case "$do_" in
-        reboot)      ( sleep 1; reboot ) >/dev/null 2>&1 & emit '{"ok":1,"msg":"rebooting"}' ;;
-        wifi_on)     (wifi up >/dev/null 2>&1 || true); emit '{"ok":1,"msg":"wifi up"}' ;;
-        wifi_off)    (wifi down >/dev/null 2>&1 || true); emit '{"ok":1,"msg":"wifi down"}' ;;
-        svc_restart) n="$(bp name)"; [ -x "/etc/init.d/$n" ] && "/etc/init.d/$n" restart >/dev/null 2>&1; emit "{\"ok\":1,\"msg\":\"restarted $n\"}" ;;
-        *)           emit '{"ok":0,"msg":"unknown action"}' ;;
+    case "$(bp do)" in
+        reboot) ( sleep 1; reboot ) >/dev/null 2>&1 & ok "rebooting" ;;
+        wifi_on) (wifi up >/dev/null 2>&1 || true); ok "wifi up" ;;
+        wifi_off) (wifi down >/dev/null 2>&1 || true); ok "wifi down" ;;
+        svc_restart) n="$(bp name)"; [ -x "/etc/init.d/$n" ] && "/etc/init.d/$n" restart >/dev/null 2>&1; ok "restarted $n" ;;
+        *) no "unknown action" ;;
     esac
 }
 
 case "$E" in
-    sys) ep_sys ;; cpu) ep_cpu ;; net) ep_net ;; wifi) ep_wifi ;;
-    clients) ep_clients ;; traffic) ep_traffic ;; dpi) ep_dpi ;;
-    ping) emit '{"ok":1}' ;;
-    action) ep_action ;;
-    *) emit '{"error":"unknown endpoint"}' ;;
+    sys) ep_sys;; cpu) ep_cpu;; net) ep_net;; wifi) ep_wifi;; clients) ep_clients;;
+    traffic) ep_traffic;; dpi) ep_dpi;;
+    wifi_cfg) ep_wifi_cfg;; wan_cfg) ep_wan_cfg;; lan_cfg) ep_lan_cfg;;
+    fwd_list) ep_fwd_list;; slease_list) ep_slease_list;; sys_cfg) ep_sys_cfg;;
+    hidden_cfg) ep_hidden_cfg;; docker_ps) ep_docker_ps;;
+    wifi_set) ep_wifi_set;; wan_set) ep_wan_set;; lan_set) ep_lan_set;;
+    fwd_add) ep_fwd_add;; fwd_del) ep_fwd_del;; slease_add) ep_slease_add;; slease_del) ep_slease_del;;
+    sys_set) ep_sys_set;; hidden_set) ep_hidden_set;; action) ep_action;;
+    ping) emit '{"ok":1}';;
+    *) emit '{"error":"unknown endpoint"}';;
 esac
