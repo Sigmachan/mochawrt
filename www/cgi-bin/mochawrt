@@ -14,12 +14,22 @@ esc(){ printf '%s' "$1" | tr -d '\r' | tr '\n\t' '  ' | sed 's/\\/\\\\/g; s/"/\\
 js(){ printf '"%s":"%s"' "$1" "$(esc "$2")"; }
 jn(){ printf '"%s":%s' "$1" "${2:-0}"; }
 ucig(){ uci -q get "$1" 2>/dev/null; }
+escm(){ printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g' | awk 'BEGIN{ORS=""}{print (NR>1?"\\n":"") $0}'; }
 
 E="$(printf '%s' "${QUERY_STRING:-}" | tr '&' '\n' | sed -n 's/^e=//p' | head -n1)"
 read_body(){ [ "${REQUEST_METHOD:-GET}" = POST ] && [ -n "${CONTENT_LENGTH:-}" ] && head -c "$CONTENT_LENGTH"; }
 BODY="$(read_body 2>/dev/null)"
 ud(){ _d="$(printf '%s' "$1" | sed 's/+/ /g; s/%/\\x/g')"; printf '%b' "$_d"; }
 bp(){ ud "$(printf '%s' "$BODY" | tr '&' '\n' | sed -n "s/^$1=//p" | head -n1)"; }
+
+# ---- PIN auth (default 7286; stored in /data/mochawrt/.pin) ----
+PINFILE=/data/mochawrt/.pin
+TOKFILE=/tmp/mochawrt.tokens
+get_pin(){ [ -r "$PINFILE" ] && cat "$PINFILE" 2>/dev/null || echo 7286; }
+gen_tok(){ head -c16 /dev/urandom 2>/dev/null | hexdump -e '16/1 "%02x"' 2>/dev/null || echo "t$(date +%s)$$"; }
+qtok(){ printf '%s' "${QUERY_STRING:-}" | tr '&' '\n' | sed -n 's/^t=//p' | head -n1; }
+ck_tok(){ printf '%s' "${HTTP_COOKIE:-}" | tr ';' '\n' | sed -n 's/^ *mw_token=//p' | head -n1; }
+auth_ok(){ _t="$(qtok)"; [ -n "$_t" ] || _t="$(bp t)"; [ -n "$_t" ] || _t="$(ck_tok)"; [ -n "$_t" ] && [ -f "$TOKFILE" ] && grep -qxF "$_t" "$TOKFILE"; }
 
 # ============================== monitoring ==============================
 ep_sys(){
@@ -118,8 +128,8 @@ ep_wifi_cfg(){
         [ -z "$dev" ] && { i=$((i+1)); continue; }
         enc="$(ucig "$s.encryption")"; key="$(ucig "$s.key")"; dis="$(ucig "$s.disabled")"
         net="$(ucig "$s.network")"; chan="$(ucig "wireless.$dev.channel")"; country="$(ucig "wireless.$dev.country")"
-        band="$(ucig "wireless.$dev.hwmode")"
-        row="{$(jn idx "$i"),$(js device "$dev"),$(js ssid "$ssid"),$(js key "$key"),$(js encryption "${enc:-none}"),$(js network "$net"),$(js band "$band"),$(js channel "$chan"),$(js country "$country"),$(jn disabled "${dis:-0}")}"
+        band="$(ucig "wireless.$dev.hwmode")"; mode="$(ucig "$s.mode")"
+        row="{$(jn idx "$i"),$(js device "$dev"),$(js ssid "$ssid"),$(js key "$key"),$(js encryption "${enc:-none}"),$(js network "$net"),$(js band "$band"),$(js channel "$chan"),$(js country "$country"),$(js mode "${mode:-ap}"),$(jn disabled "${dis:-0}")}"
         [ $first = 1 ] && { out="$row"; first=0; } || out="$out,$row"
         i=$((i+1))
     done
@@ -265,6 +275,118 @@ ep_action(){
     esac
 }
 
+# ============================== unified Wi-Fi (WiFi7 single SSID) ==============================
+ep_wifi_set_all(){
+    ss="$(bp ssid)"; ky="$(bp key)"; en="$(bp enc)"; di="$(bp disabled)"; cc="$(bp country)"; hide="$(bp hidden)"
+    i=0; n=0
+    while [ $i -lt 16 ]; do
+        s="wireless.@wifi-iface[$i]"; dev="$(ucig "$s.device")"
+        if [ -z "$dev" ]; then i=$((i+1)); [ $i -gt 8 ] && break; continue; fi
+        # only touch primary AP ifaces (mode ap, not the miwifi/mesh backhaul SSIDs)
+        mode="$(ucig "$s.mode")"; cur="$(ucig "$s.ssid")"
+        case "$mode" in ap|"") : ;; *) i=$((i+1)); continue;; esac
+        case "$cur" in *miwifi*|MiMesh*) i=$((i+1)); continue;; esac
+        [ -n "$ss" ] && uci set "$s.ssid=$ss"
+        [ -n "$en" ] && uci set "$s.encryption=$en"
+        [ "$en" = none ] && uci -q delete "$s.key" || { [ -n "$ky" ] && uci set "$s.key=$ky"; }
+        [ -n "$di" ] && uci set "$s.disabled=$di"
+        [ -n "$hide" ] && uci set "$s.hidden=$hide"
+        [ -n "$cc" ] && uci set "wireless.$dev.country=$cc"
+        n=$((n+1)); i=$((i+1))
+    done
+    uci commit wireless
+    ( wifi reload >/dev/null 2>&1 || /sbin/wifi >/dev/null 2>&1 ) &
+    ok "Wi-Fi applied to $n radios (reloading)"
+}
+
+# ============================== diagnostics / logs / storage ==============================
+ep_diag(){
+    tgt="$(bp target)"; case "$tgt" in ''|*[!a-zA-Z0-9.:_-]*) no "bad target"; return;; esac
+    case "$(bp tool)" in
+        ping)       out="$(ping -c4 -w8 "$tgt" 2>&1)";;
+        traceroute) out="$(traceroute -q1 -w2 -m15 "$tgt" 2>&1 || echo 'traceroute unavailable')";;
+        nslookup)   out="$(nslookup "$tgt" 2>&1)";;
+        *) no "unknown tool"; return;;
+    esac
+    emit "{\"out\":\"$(escm "$out")\"}"
+}
+ep_logs(){ out="$( (logread 2>/dev/null | tail -80; echo '--- dmesg ---'; dmesg 2>/dev/null | tail -25) )"; emit "{\"out\":\"$(escm "$out")\"}"; }
+ep_storage(){ out="$(df -h 2>/dev/null | grep -vE '^Filesystem'; echo '--- mounts ---'; mount 2>/dev/null | grep -E '/mnt|/data|usb')"; emit "{\"out\":\"$(escm "$out")\"}"; }
+
+# ============================== access control (block device by MAC) ==============================
+ep_acl_list(){
+    out=""; first=1; i=0
+    while [ $i -lt 64 ]; do
+        s="firewall.@rule[$i]"; nm="$(ucig "$s.name")"; [ -z "$nm" ] && [ -z "$(ucig "$s.target")" ] && break
+        case "$nm" in MWBLOCK_*) row="{$(jn idx "$i"),$(js mac "$(ucig "$s.src_mac")")}"; [ $first = 1 ] && { out="$row"; first=0; } || out="$out,$row";; esac
+        i=$((i+1))
+    done
+    emit "{\"blocked\":[$out]}"
+}
+ep_acl_block(){ mac="$(bp mac)"; case "$mac" in ''|*[!0-9a-fA-F:]*) no "bad mac"; return;; esac
+    uci add firewall rule >/dev/null; uci set firewall.@rule[-1].name="MWBLOCK_$(echo "$mac"|tr ':' '_')"
+    uci set firewall.@rule[-1].src=lan; uci set firewall.@rule[-1].src_mac="$mac"; uci set firewall.@rule[-1].dest='*'; uci set firewall.@rule[-1].proto=all; uci set firewall.@rule[-1].target=REJECT
+    uci commit firewall; ( /etc/init.d/firewall reload >/dev/null 2>&1 ) & ok "blocked $mac" ; }
+ep_acl_unblock(){ i="$(bp idx)"; case "$i" in ''|*[!0-9]*) no "bad idx";; *) uci -q delete "firewall.@rule[$i]"; uci commit firewall; ( /etc/init.d/firewall reload >/dev/null 2>&1 ) & ok "unblocked";; esac; }
+ep_wol(){ mac="$(bp mac)"; case "$mac" in ''|*[!0-9a-fA-F:]*) no "bad mac"; return;; esac
+    if command -v etherwake >/dev/null 2>&1; then etherwake -i br-lan "$mac" 2>/dev/null && ok "WoL sent"; 
+    elif command -v wol >/dev/null 2>&1; then wol "$mac" 2>/dev/null && ok "WoL sent"; else no "no WoL tool (install etherwake)"; fi; }
+
+# ============================== config backup / failsafe recovery ==============================
+ep_backup(){ printf 'Status: 200 OK\r\nContent-Type: text/plain\r\nContent-Disposition: attachment; filename=mochawrt-config.txt\r\n\r\n'; uci export 2>/dev/null; }
+ep_recover(){ # safe recovery: restart core services (no routing hijack)
+    for s in network dnsmasq firewall odhcpd; do [ -x "/etc/init.d/$s" ] && "/etc/init.d/$s" restart >/dev/null 2>&1; done
+    ok "network/dnsmasq/firewall/odhcpd restarted"; }
+
+# ============================== router tweaks (safe, revertable) ==============================
+TWK=/data/mochawrt/tweaks.applied
+ep_tweaks_status(){ [ -f "$TWK" ] && emit '{"applied":1}' || emit '{"applied":0}'; }
+ep_tweaks_apply(){
+    mkdir -p /data/mochawrt
+    # safe network/perf sysctls (revertable; nothing that drops connectivity)
+    cat > /tmp/99-mochawrt.conf <<'EOS'
+net.core.default_qdisc=fq_codel
+net.ipv4.tcp_congestion_control=bbr
+net.ipv4.tcp_fastopen=3
+net.core.rmem_max=8388608
+net.core.wmem_max=8388608
+net.netfilter.nf_conntrack_max=65536
+net.ipv4.tcp_mtu_probing=1
+EOS
+    sysctl -p /tmp/99-mochawrt.conf >/dev/null 2>&1 || true
+    # software flow offloading (big throughput win on these SoCs) if available
+    if uci -q get firewall.@defaults[0] >/dev/null 2>&1; then
+        uci set firewall.@defaults[0].flow_offloading='1' 2>/dev/null || true
+        uci commit firewall; /etc/init.d/firewall reload >/dev/null 2>&1 || true
+    fi
+    # packet steering (spread softirq across cores)
+    uci -q set network.globals.packet_steering='1' 2>/dev/null && uci commit network && /etc/init.d/network reload >/dev/null 2>&1 || true
+    touch "$TWK"; ok "tweaks applied (BBR+fq_codel, flow-offload, packet-steering)"
+}
+ep_tweaks_off(){
+    rm -f /tmp/99-mochawrt.conf "$TWK"
+    uci -q set firewall.@defaults[0].flow_offloading='0' 2>/dev/null && uci commit firewall && /etc/init.d/firewall reload >/dev/null 2>&1 || true
+    uci -q delete network.globals.packet_steering 2>/dev/null && uci commit network && /etc/init.d/network reload >/dev/null 2>&1 || true
+    ok "tweaks reverted (sysctls reset on reboot)"
+}
+
+# ---- public auth endpoints ----
+case "$E" in
+    login)
+        if [ "$(bp pin)" = "$(get_pin)" ]; then tok="$(gen_tok)"; echo "$tok" >> "$TOKFILE" 2>/dev/null
+            emit "{\"ok\":1,\"token\":\"$tok\"}"; else emit '{"ok":0,"msg":"wrong PIN"}'; fi
+        exit 0 ;;
+    logout)
+        _t="$(qtok)"; [ -n "$_t" ] || _t="$(bp t)"
+        [ -f "$TOKFILE" ] && { grep -vxF "$_t" "$TOKFILE" > "$TOKFILE.t" 2>/dev/null && mv "$TOKFILE.t" "$TOKFILE"; }
+        emit '{"ok":1}'; exit 0 ;;
+    authcheck)
+        auth_ok && emit '{"auth":1}' || emit '{"auth":0}'; exit 0 ;;
+esac
+
+# ---- everything below requires a valid token ----
+auth_ok || { emit '{"error":"auth","auth":0}'; exit 0; }
+
 case "$E" in
     sys) ep_sys;; cpu) ep_cpu;; net) ep_net;; wifi) ep_wifi;; clients) ep_clients;;
     traffic) ep_traffic;; dpi) ep_dpi;;
@@ -274,6 +396,12 @@ case "$E" in
     wifi_set) ep_wifi_set;; wan_set) ep_wan_set;; lan_set) ep_lan_set;;
     fwd_add) ep_fwd_add;; fwd_del) ep_fwd_del;; slease_add) ep_slease_add;; slease_del) ep_slease_del;;
     sys_set) ep_sys_set;; hidden_set) ep_hidden_set;; action) ep_action;;
+    wifi_set_all) ep_wifi_set_all;;
+    diag) ep_diag;; logs) ep_logs;; storage) ep_storage;;
+    acl_list) ep_acl_list;; acl_block) ep_acl_block;; acl_unblock) ep_acl_unblock;; wol) ep_wol;;
+    backup) ep_backup;; recover) ep_recover;;
+    tweaks_status) ep_tweaks_status;; tweaks_apply) ep_tweaks_apply;; tweaks_off) ep_tweaks_off;;
+    setpin) np="$(bp pin)"; case "$np" in [0-9][0-9][0-9][0-9]*) mkdir -p /data/mochawrt; echo "$np" > "$PINFILE"; emit '{"ok":1,"msg":"PIN updated"}';; *) emit '{"ok":0,"msg":"PIN must be >=4 digits"}';; esac ;;
     ping) emit '{"ok":1}';;
     *) emit '{"error":"unknown endpoint"}';;
 esac
