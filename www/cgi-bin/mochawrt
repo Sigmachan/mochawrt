@@ -1,0 +1,151 @@
+#!/bin/sh
+# mochawrt :: CGI JSON API (uhttpd)
+# Reads everything from /proc + ubus + uci + busybox tools through the compat
+# layer, so it works on real OpenWrt and on Xiaomi vendor forks alike.
+# Endpoints via ?e= :
+#   sys net wifi clients traffic dpi ping   (GET, read-only)
+#   action (POST: do=reboot|wifi_on|wifi_off|svc_restart&name=...)
+SELF="${SCRIPT_FILENAME:-$0}"
+ROOT="$(cd "$(dirname "$SELF")/../.." 2>/dev/null && pwd)"
+[ -f "$ROOT/lib/compat.sh" ] && . "$ROOT/lib/compat.sh" 2>/dev/null
+
+emit(){ printf 'Status: 200 OK\r\nContent-Type: application/json\r\nCache-Control: no-store\r\n\r\n%s' "$1"; }
+esc(){ printf '%s' "$1" | tr -d '\r' | tr '\n\t' '  ' | sed 's/\\/\\\\/g; s/"/\\"/g'; }
+js(){ printf '"%s":"%s"' "$1" "$(esc "$2")"; }   # string field
+jn(){ printf '"%s":%s' "$1" "${2:-0}"; }          # number field (raw)
+
+E="$(printf '%s' "${QUERY_STRING:-}" | tr '&' '\n' | sed -n 's/^e=//p' | head -n1)"
+qp(){ printf '%s' "${QUERY_STRING:-}" | tr '&' '\n' | sed -n "s/^$1=//p" | head -n1; }
+
+read_body(){ [ "${REQUEST_METHOD:-GET}" = POST ] && [ -n "${CONTENT_LENGTH:-}" ] && head -c "$CONTENT_LENGTH"; }
+bp(){ read_body 2>/dev/null | tr '&' '\n' | sed -n "s/^$1=//p" | head -n1; }
+
+# ---------------------------------------------------------------- sys
+ep_sys(){
+    model="$(compat_model)"; board="$(compat_board)"; soc="$(compat_soc)"
+    prof="$(compat_profile)"; vendor="$(compat_vendor)"
+    kernel="$(uname -r 2>/dev/null)"; host="$(cat /proc/sys/kernel/hostname 2>/dev/null)"
+    fw=""; [ -r /etc/openwrt_release ] && fw="$(. /etc/openwrt_release 2>/dev/null; echo "$DISTRIB_DESCRIPTION")"
+    [ -z "$fw" ] && _has ubus && fw="OpenWrt $(ubus call system board 2>/dev/null | sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' | head -n1)"
+    up="$(cut -d. -f1 /proc/uptime 2>/dev/null)"; up="${up:-0}"
+    set -- $(cat /proc/loadavg 2>/dev/null); l1="${1:-0}"; l5="${2:-0}"; l15="${3:-0}"
+    cores="$(grep -c ^processor /proc/cpuinfo 2>/dev/null)"; cores="${cores:-1}"
+    mt="$(sed -n 's/^MemTotal: *\([0-9]*\).*/\1/p' /proc/meminfo)"; mt="${mt:-0}"
+    ma="$(sed -n 's/^MemAvailable: *\([0-9]*\).*/\1/p' /proc/meminfo)"
+    if [ -z "$ma" ]; then
+        mf="$(sed -n 's/^MemFree: *\([0-9]*\).*/\1/p' /proc/meminfo)"
+        mc="$(sed -n 's/^Cached: *\([0-9]*\).*/\1/p' /proc/meminfo)"
+        ma=$(( ${mf:-0} + ${mc:-0} ))
+    fi
+    used=$(( mt - ${ma:-0} ))
+    tm="$(compat_temp_milli)"; tc="null"; [ -n "$tm" ] && tc=$(( tm / 1000 ))
+    emit "{$(js model "$model"),$(js board "$board"),$(js soc "$soc"),$(js profile "$prof"),$(jn vendor "$vendor"),$(js kernel "$kernel"),$(js hostname "$host"),$(js firmware "${fw:-OpenWrt}"),$(jn uptime "$up"),\"load\":[$l1,$l5,$l15],$(jn cores "$cores"),$(jn mem_total "$mt"),$(jn mem_used "$used"),$(jn mem_avail "${ma:-0}"),\"temp_c\":$tc}"
+}
+
+# ---------------------------------------------------------------- cpu (1s sample)
+ep_cpu(){
+    read_stat(){ sed -n 's/^cpu  *//p' /proc/stat | head -n1; }
+    a="$(read_stat)"; sleep 1; b="$(read_stat)"
+    set -- $a; ai=0; at=0; for x in "$@"; do at=$((at+x)); done; ai=$((${4:-0}+${5:-0}))
+    set -- $b; bi=0; bt=0; for x in "$@"; do bt=$((bt+x)); done; bi=$((${4:-0}+${5:-0}))
+    dt=$((bt-at)); di=$((bi-ai)); pct=0; [ "$dt" -gt 0 ] && pct=$(( (100*(dt-di))/dt ))
+    emit "{$(jn usage "$pct")}"
+}
+
+# ---------------------------------------------------------------- net
+ep_net(){
+    gw="$(ip route 2>/dev/null | awk '/^default/{print $3; exit}')"
+    dns="$(sed -n 's/^nameserver  *//p' /etc/resolv.conf 2>/dev/null | tr '\n' ' ')"
+    [ -z "$dns" ] && [ -r /tmp/resolv.conf.d/resolv.conf.auto ] && dns="$(sed -n 's/^nameserver  *//p' /tmp/resolv.conf.d/resolv.conf.auto | tr '\n' ' ')"
+    out=""; first=1
+    for d in /sys/class/net/*; do
+        n=$(basename "$d"); [ "$n" = lo ] && continue
+        oper="$(cat "$d/operstate" 2>/dev/null)"; mac="$(cat "$d/address" 2>/dev/null)"
+        spd="$(cat "$d/speed" 2>/dev/null)"; case "$spd" in ''|-*) spd=null;; esac
+        ip4="$(ip -o -4 addr show "$n" 2>/dev/null | awk '{print $4}' | head -n1)"
+        rx="$(cat "$d/statistics/rx_bytes" 2>/dev/null)"; tx="$(cat "$d/statistics/tx_bytes" 2>/dev/null)"
+        row="{$(js name "$n"),$(js state "${oper:-unknown}"),$(js mac "$mac"),$(js ipv4 "$ip4"),$(jn rx "${rx:-0}"),$(jn tx "${tx:-0}"),\"speed\":${spd}}"
+        [ $first = 1 ] && { out="$row"; first=0; } || out="$out,$row"
+    done
+    emit "{$(js gateway "$gw"),$(js dns "$dns"),$(js wan "$(compat_wan_iface)"),$(js lan "$(compat_lan_iface)"),\"ifaces\":[$out]}"
+}
+
+# ---------------------------------------------------------------- wifi
+ep_wifi(){
+    out=""; first=1
+    for ifc in $(compat_wifi_ifaces); do
+        ssid=""; chan=""; mode=""; sig=""; cl=0
+        if _has iwinfo; then
+            info="$(iwinfo "$ifc" info 2>/dev/null)"
+            ssid="$(printf '%s' "$info" | sed -n 's/.*ESSID: *"\([^"]*\)".*/\1/p' | head -n1)"
+            chan="$(printf '%s' "$info" | sed -n 's/.*Channel: *\([0-9]*\).*/\1/p' | head -n1)"
+            mode="$(printf '%s' "$info" | sed -n 's/.*Mode: *\([A-Za-z]*\).*/\1/p' | head -n1)"
+            cl="$(iwinfo "$ifc" assoclist 2>/dev/null | grep -c 'dBm')"
+        elif _has iw; then
+            ssid="$(iw dev "$ifc" info 2>/dev/null | sed -n 's/.*ssid \(.*\)/\1/p' | head -n1)"
+            chan="$(iw dev "$ifc" info 2>/dev/null | sed -n 's/.*channel \([0-9]*\).*/\1/p' | head -n1)"
+            mode="$(iw dev "$ifc" info 2>/dev/null | sed -n 's/.*type \(.*\)/\1/p' | head -n1)"
+            cl="$(iw dev "$ifc" station dump 2>/dev/null | grep -c '^Station')"
+        fi
+        row="{$(js iface "$ifc"),$(js ssid "${ssid:-—}"),$(js channel "${chan:-?}"),$(js mode "${mode:-AP}"),$(jn clients "${cl:-0}")}"
+        [ $first = 1 ] && { out="$row"; first=0; } || out="$out,$row"
+    done
+    emit "{\"radios\":[$out]}"
+}
+
+# ---------------------------------------------------------------- clients
+ep_clients(){
+    lf="$(compat_leases_file)"; out=""; first=1
+    if [ -r "$lf" ]; then
+        while read -r exp mac ip name rest; do
+            [ -n "$mac" ] || continue
+            row="{$(js mac "$mac"),$(js ip "$ip"),$(js name "${name:-*}"),$(jn expiry "${exp:-0}")}"
+            [ $first = 1 ] && { out="$row"; first=0; } || out="$out,$row"
+        done < "$lf"
+    fi
+    emit "{\"leases\":[$out]}"
+}
+
+# ---------------------------------------------------------------- traffic
+ep_traffic(){
+    out=""; first=1
+    while read -r line; do
+        case "$line" in *:*) ;; *) continue;; esac
+        n="${line%%:*}"; n="$(printf '%s' "$n" | tr -d ' ')"; [ "$n" = lo ] && continue
+        v="${line#*:}"; set -- $v; rx="$1"; tx="$9"
+        row="{$(js name "$n"),$(jn rx "${rx:-0}"),$(jn tx "${tx:-0}")}"
+        [ $first = 1 ] && { out="$row"; first=0; } || out="$out,$row"
+    done < /proc/net/dev
+    emit "{\"t\":$(date +%s 2>/dev/null || echo 0),\"ifaces\":[$out]}"
+}
+
+# ---------------------------------------------------------------- dpi (open-routerich)
+ep_dpi(){
+    yu=0; doh=0; red=0; quic=0; installed=0
+    command -v opkg >/dev/null 2>&1 && opkg list-installed 2>/dev/null | grep -q '^youtubeUnblock ' && yu=1
+    command -v opkg >/dev/null 2>&1 && opkg list-installed 2>/dev/null | grep -q '^https-dns-proxy ' && doh=1
+    grep -q '#5056\|#5353\|xbox.com' /etc/config/dhcp 2>/dev/null && red=1
+    grep -q 'Block_UDP_443' /etc/config/firewall 2>/dev/null && quic=1
+    { [ "$red" = 1 ] || [ "$quic" = 1 ] || [ "$yu" = 1 ]; } && installed=1
+    emit "{$(jn installed "$installed"),$(jn yu "$yu"),$(jn doh "$doh"),$(jn redirect "$red"),$(jn quic "$quic")}"
+}
+
+# ---------------------------------------------------------------- action (POST)
+ep_action(){
+    do_="$(bp do)"
+    case "$do_" in
+        reboot)      ( sleep 1; reboot ) >/dev/null 2>&1 & emit '{"ok":1,"msg":"rebooting"}' ;;
+        wifi_on)     (wifi up >/dev/null 2>&1 || true); emit '{"ok":1,"msg":"wifi up"}' ;;
+        wifi_off)    (wifi down >/dev/null 2>&1 || true); emit '{"ok":1,"msg":"wifi down"}' ;;
+        svc_restart) n="$(bp name)"; [ -x "/etc/init.d/$n" ] && "/etc/init.d/$n" restart >/dev/null 2>&1; emit "{\"ok\":1,\"msg\":\"restarted $n\"}" ;;
+        *)           emit '{"ok":0,"msg":"unknown action"}' ;;
+    esac
+}
+
+case "$E" in
+    sys) ep_sys ;; cpu) ep_cpu ;; net) ep_net ;; wifi) ep_wifi ;;
+    clients) ep_clients ;; traffic) ep_traffic ;; dpi) ep_dpi ;;
+    ping) emit '{"ok":1}' ;;
+    action) ep_action ;;
+    *) emit '{"error":"unknown endpoint"}' ;;
+esac

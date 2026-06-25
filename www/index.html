@@ -1,0 +1,337 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>mochawrt</title>
+<style>
+/* ---- Catppuccin Mocha ---- */
+:root{
+  --base:#1e1e2e; --mantle:#181825; --crust:#11111b;
+  --s0:#313244; --s1:#45475a; --s2:#585b70;
+  --ov0:#6c7086; --ov1:#7f849c; --ov2:#9399b2;
+  --text:#cdd6f4; --sub1:#bac2de; --sub0:#a6adc8;
+  --rosewater:#f5e0dc; --flamingo:#f2cdcd; --pink:#f5c2e7; --mauve:#cba6f7;
+  --red:#f38ba8; --maroon:#eba0ac; --peach:#fab387; --yellow:#f9e2af;
+  --green:#a6e3a1; --teal:#94e2d5; --sky:#89dceb; --sapphire:#74c7ec;
+  --blue:#89b4fa; --lavender:#b4befe;
+  --r:16px;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font:14.5px/1.55 -apple-system,BlinkMacSystemFont,"Inter","Segoe UI",Roboto,sans-serif;
+  color:var(--text);background:var(--base);min-height:100vh;-webkit-font-smoothing:antialiased}
+::selection{background:var(--mauve);color:var(--crust)}
+::-webkit-scrollbar{width:9px;height:9px}::-webkit-scrollbar-thumb{background:var(--s1);border-radius:9px}
+::-webkit-scrollbar-track{background:transparent}
+a{color:var(--blue);text-decoration:none}
+
+.app{display:grid;grid-template-columns:236px 1fr;min-height:100vh}
+/* ---- sidebar ---- */
+aside{background:var(--mantle);border-right:1px solid var(--crust);padding:18px 14px;display:flex;flex-direction:column;gap:6px;position:sticky;top:0;height:100vh}
+.brand{display:flex;align-items:center;gap:11px;padding:6px 8px 16px}
+.brand .ic{width:38px;height:38px;border-radius:11px;display:grid;place-items:center;font-size:20px;
+  background:linear-gradient(135deg,var(--mauve),var(--blue));box-shadow:0 6px 22px rgba(203,166,247,.4)}
+.brand b{font-size:16px;letter-spacing:.3px}.brand small{display:block;color:var(--ov2);font-size:11px}
+.nav{display:flex;flex-direction:column;gap:3px;margin-top:4px}
+.nav a{display:flex;align-items:center;gap:11px;padding:10px 12px;border-radius:11px;color:var(--sub0);font-weight:500;cursor:pointer;transition:.15s}
+.nav a .e{width:20px;text-align:center;font-size:15px}
+.nav a:hover{background:var(--s0);color:var(--text)}
+.nav a.active{background:linear-gradient(135deg,rgba(203,166,247,.22),rgba(137,180,250,.16));color:var(--text);box-shadow:inset 0 0 0 1px rgba(203,166,247,.25)}
+.side-foot{margin-top:auto;color:var(--ov0);font-size:11px;padding:8px}
+.dot{width:8px;height:8px;border-radius:50%;display:inline-block;background:var(--green);box-shadow:0 0 8px var(--green)}
+.dot.off{background:var(--red);box-shadow:0 0 8px var(--red)}
+
+/* ---- main ---- */
+main{padding:22px 26px 60px;max-width:1180px}
+.top{display:flex;align-items:center;justify-content:space-between;margin-bottom:18px;flex-wrap:wrap;gap:12px}
+.top h1{font-size:21px;font-weight:650}
+.top .meta{color:var(--ov2);font-size:13px}
+.page{display:none;animation:fade .25s ease}.page.on{display:block}
+@keyframes fade{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:14px}
+.card{background:var(--mantle);border:1px solid var(--s0);border-radius:var(--r);padding:16px 17px;box-shadow:0 8px 30px rgba(0,0,0,.25)}
+.card h3{font-size:12px;text-transform:uppercase;letter-spacing:1.1px;color:var(--ov2);font-weight:600;margin-bottom:12px;display:flex;align-items:center;gap:8px}
+.big{font-size:26px;font-weight:700}.unit{font-size:13px;color:var(--ov2);font-weight:500}
+.muted{color:var(--sub0)}
+.gauge{display:flex;align-items:center;gap:14px}
+.ring{--p:0;--c:var(--blue);width:70px;height:70px;border-radius:50%;flex:0 0 auto;
+  background:conic-gradient(var(--c) calc(var(--p)*1%),var(--s0) 0);display:grid;place-items:center;transition:.5s}
+.ring i{width:54px;height:54px;border-radius:50%;background:var(--mantle);display:grid;place-items:center;font-style:normal;font-weight:700;font-size:15px}
+.kv{display:flex;justify-content:space-between;padding:7px 0;border-bottom:1px solid var(--s0);font-size:13.5px}
+.kv:last-child{border:0}.kv .k{color:var(--sub0)}.kv .v{font-weight:600}
+.bar{height:8px;border-radius:8px;background:var(--s0);overflow:hidden;margin-top:8px}
+.bar i{display:block;height:100%;border-radius:8px;background:linear-gradient(90deg,var(--green),var(--teal));transition:.5s;font-style:normal}
+.chartwrap{background:var(--mantle);border:1px solid var(--s0);border-radius:var(--r);padding:16px;margin-top:14px}
+.legend{display:flex;gap:18px;font-size:12.5px;color:var(--sub0);margin-bottom:8px}
+.legend b{font-weight:600}.lg-dn{color:var(--green)}.lg-up{color:var(--blue)}
+canvas{width:100%;height:150px;display:block}
+
+table{width:100%;border-collapse:collapse;font-size:13.5px}
+th{text-align:left;color:var(--ov2);font-weight:600;font-size:11.5px;text-transform:uppercase;letter-spacing:.6px;padding:9px 10px;border-bottom:1px solid var(--s0)}
+td{padding:10px;border-bottom:1px solid var(--s0)}tr:last-child td{border:0}
+tr:hover td{background:var(--base)}
+.tag{display:inline-block;padding:2px 9px;border-radius:999px;font-size:11.5px;font-weight:600}
+.tag.up{background:rgba(166,227,161,.16);color:var(--green)}
+.tag.down{background:rgba(243,139,168,.16);color:var(--red)}
+.tag.info{background:rgba(137,180,250,.16);color:var(--blue)}
+.tag.warn{background:rgba(249,226,175,.16);color:var(--yellow)}
+.mono{font-family:ui-monospace,Menlo,monospace;font-size:12.5px;color:var(--sub1)}
+button{font:inherit;font-weight:600;border:1px solid var(--s1);border-radius:11px;padding:9px 15px;cursor:pointer;color:var(--text);background:var(--s0);transition:.15s}
+button:hover{background:var(--s1);transform:translateY(-1px)}
+button.accent{background:linear-gradient(135deg,var(--mauve),var(--blue));color:var(--crust);border:0}
+button.danger{background:rgba(243,139,168,.16);color:var(--red);border-color:rgba(243,139,168,.35)}
+.wifi-card{background:var(--mantle);border:1px solid var(--s0);border-radius:var(--r);padding:16px;display:flex;flex-direction:column;gap:6px}
+.wifi-card .ss{font-size:17px;font-weight:700}
+.row-actions{display:flex;gap:10px;flex-wrap:wrap;margin-top:14px}
+.empty{color:var(--ov0);padding:18px;text-align:center}
+.spin{width:15px;height:15px;border:2px solid var(--s1);border-top-color:var(--mauve);border-radius:50%;display:inline-block;animation:s .7s linear infinite}@keyframes s{to{transform:rotate(360deg)}}
+.toast{position:fixed;bottom:20px;right:20px;background:var(--s0);border:1px solid var(--s1);border-radius:12px;padding:12px 16px;box-shadow:0 10px 40px rgba(0,0,0,.5);opacity:0;transform:translateY(10px);transition:.25s;z-index:50}
+.toast.show{opacity:1;transform:none}
+@media(max-width:760px){.app{grid-template-columns:1fr}aside{position:fixed;z-index:40;transform:translateX(-100%);transition:.2s;width:236px}aside.open{transform:none}main{padding:16px}.burger{display:inline-grid!important}}
+.burger{display:none;place-items:center;width:38px;height:38px;border-radius:10px;background:var(--s0)}
+</style>
+</head>
+<body>
+<div class="app">
+  <aside id="side">
+    <div class="brand"><div class="ic">☕</div><div><b>mochawrt</b><small>catppuccin · mocha</small></div></div>
+    <nav class="nav" id="nav">
+      <a data-p="dash" class="active"><span class="e">📊</span> Дашборд</a>
+      <a data-p="net"><span class="e">🌐</span> Сеть</a>
+      <a data-p="wifi"><span class="e">📶</span> Wi-Fi</a>
+      <a data-p="clients"><span class="e">💻</span> Клиенты</a>
+      <a data-p="dpi"><span class="e">🛡️</span> DNS & DPI</a>
+      <a data-p="system"><span class="e">⚙️</span> Система</a>
+    </nav>
+    <div class="side-foot"><span class="dot" id="live"></span> <span id="livetxt">подключение…</span></div>
+  </aside>
+
+  <main>
+    <div class="top">
+      <div style="display:flex;align-items:center;gap:12px">
+        <div class="burger" id="burger">☰</div>
+        <div><h1 id="ptitle">Дашборд</h1><div class="meta" id="submeta">…</div></div>
+      </div>
+      <button id="reboot" class="danger">⟳ Перезагрузка</button>
+    </div>
+
+    <!-- DASHBOARD -->
+    <section class="page on" id="dash">
+      <div class="cards">
+        <div class="card"><h3>⚡ Процессор</h3><div class="gauge"><div class="ring" id="cpuRing" style="--c:var(--blue)"><i id="cpuPct">—</i></div>
+          <div><div class="muted" id="cpuCores">— ядер</div><div class="muted" id="loadTxt">load —</div></div></div></div>
+        <div class="card"><h3>🧠 Память</h3><div class="gauge"><div class="ring" id="memRing" style="--c:var(--green)"><i id="memPct">—</i></div>
+          <div><div class="big" id="memUsed">—</div><div class="unit" id="memTotal">из —</div></div></div></div>
+        <div class="card"><h3>🌡️ Температура</h3><div class="big" id="temp">—<span class="unit"> °C</span></div><div class="bar"><i id="tempBar" style="width:0%"></i></div></div>
+        <div class="card"><h3>⏱️ Аптайм</h3><div class="big" id="uptime">—</div><div class="muted" id="fwline">—</div></div>
+      </div>
+      <div class="chartwrap">
+        <div class="legend"><span class="lg-dn">● <b id="dnNow">0</b> ↓</span><span class="lg-up">● <b id="upNow">0</b> ↑</span><span class="muted" id="chIface">— · трафик</span></div>
+        <canvas id="chart" width="900" height="150"></canvas>
+      </div>
+    </section>
+
+    <!-- NETWORK -->
+    <section class="page" id="net">
+      <div class="cards">
+        <div class="card"><h3>🚪 Шлюз</h3><div class="big mono" id="gw">—</div></div>
+        <div class="card"><h3>🧭 DNS</h3><div class="mono" id="dns">—</div></div>
+        <div class="card"><h3>🔌 WAN / LAN</h3><div class="big" id="wanlan">—</div></div>
+      </div>
+      <div class="chartwrap" style="margin-top:14px;padding:0;overflow:auto">
+        <table><thead><tr><th>Интерфейс</th><th>Состояние</th><th>IPv4</th><th>MAC</th><th>RX</th><th>TX</th></tr></thead>
+        <tbody id="ifTbody"><tr><td colspan="6" class="empty"><span class="spin"></span></td></tr></tbody></table>
+      </div>
+    </section>
+
+    <!-- WIFI -->
+    <section class="page" id="wifi">
+      <div class="cards" id="wifiCards"><div class="empty"><span class="spin"></span></div></div>
+    </section>
+
+    <!-- CLIENTS -->
+    <section class="page" id="clients">
+      <div class="chartwrap" style="padding:0;overflow:auto">
+        <table><thead><tr><th>Имя</th><th>IP</th><th>MAC</th><th>Аренда до</th></tr></thead>
+        <tbody id="clTbody"><tr><td colspan="4" class="empty"><span class="spin"></span></td></tr></tbody></table>
+      </div>
+    </section>
+
+    <!-- DPI -->
+    <section class="page" id="dpi">
+      <div class="cards">
+        <div class="card"><h3>🛡️ open-routerich</h3><div class="big" id="dpiState">—</div><div class="muted">обход DPI</div></div>
+        <div class="card"><h3>youtubeUnblock</h3><div class="big" id="dpiYu">—</div></div>
+        <div class="card"><h3>DNS-редирект</h3><div class="big" id="dpiRed">—</div></div>
+        <div class="card"><h3>QUIC-блок</h3><div class="big" id="dpiQuic">—</div></div>
+      </div>
+      <div class="card" style="margin-top:14px">
+        <h3>Управление</h3>
+        <p class="muted">Установка/откат обхода DPI делается тулкитом open-routerich. Если его панель установлена — она на отдельном порту.</p>
+        <div class="row-actions">
+          <a href="https://github.com/Sigmachan/open-routerich" target="_blank"><button class="accent">📦 open-routerich на GitHub</button></a>
+          <button id="dpiRefresh">↻ Обновить статус</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- SYSTEM -->
+    <section class="page" id="system">
+      <div class="card">
+        <h3>ℹ️ Об устройстве</h3>
+        <div class="kv"><span class="k">Модель</span><span class="v" id="sModel">—</span></div>
+        <div class="kv"><span class="k">Плата</span><span class="v" id="sBoard">—</span></div>
+        <div class="kv"><span class="k">SoC</span><span class="v" id="sSoc">—</span></div>
+        <div class="kv"><span class="k">Профиль совместимости</span><span class="v" id="sProf">—</span></div>
+        <div class="kv"><span class="k">Прошивка</span><span class="v" id="sFw">—</span></div>
+        <div class="kv"><span class="k">Ядро</span><span class="v" id="sKernel">—</span></div>
+        <div class="kv"><span class="k">Хост</span><span class="v" id="sHost">—</span></div>
+      </div>
+      <div class="card" style="margin-top:14px">
+        <h3>🔧 Сервисы</h3>
+        <div class="row-actions">
+          <button data-svc="dnsmasq">↻ dnsmasq</button>
+          <button data-svc="firewall">↻ firewall</button>
+          <button data-svc="network">↻ network</button>
+          <button data-svc="uhttpd">↻ uhttpd</button>
+        </div>
+        <div class="row-actions"><button id="wifiOn">📶 Wi-Fi вкл</button><button id="wifiOff">📵 Wi-Fi выкл</button></div>
+      </div>
+    </section>
+  </main>
+</div>
+<div class="toast" id="toast"></div>
+
+<script>
+const API="cgi-bin/mochawrt";
+const $=s=>document.querySelector(s), $$=s=>document.querySelectorAll(s);
+const titles={dash:"Дашборд",net:"Сеть",wifi:"Wi-Fi",clients:"Клиенты",dpi:"DNS & DPI",system:"Система"};
+let online=false;
+async function api(e,opt){try{const r=await fetch(`${API}?e=${e}`,opt);const j=await r.json();setLive(true);return j;}catch(x){setLive(false);return null;}}
+function setLive(b){online=b;$("#live").className="dot"+(b?"":" off");$("#livetxt").textContent=b?"онлайн":"оффлайн";}
+function toast(t){const e=$("#toast");e.textContent=t;e.classList.add("show");setTimeout(()=>e.classList.remove("show"),2600);}
+function human(b){b=+b||0;const u=["B","KB","MB","GB","TB"];let i=0;while(b>=1024&&i<u.length-1){b/=1024;i++;}return b.toFixed(b<10&&i>0?1:0)+" "+u[i];}
+function rate(b){return human(b)+"/s";}
+function dur(s){s=+s||0;const d=Math.floor(s/86400),h=Math.floor(s%86400/3600),m=Math.floor(s%3600/60);return (d?d+"д ":"")+(h?h+"ч ":"")+m+"м";}
+
+// router
+function go(p){$$("#nav a").forEach(a=>a.classList.toggle("active",a.dataset.p===p));
+  $$(".page").forEach(s=>s.classList.toggle("on",s.id===p));
+  $("#ptitle").textContent=titles[p];$("#side").classList.remove("open");loadPage(p);}
+$$("#nav a").forEach(a=>a.onclick=()=>go(a.dataset.p));
+$("#burger").onclick=()=>$("#side").classList.toggle("open");
+
+// dashboard
+async function loadSys(){
+  const s=await api("sys");if(!s)return;
+  $("#submeta").textContent=`${s.model} · ${s.firmware}`;
+  $("#cpuCores").textContent=s.cores+" ядер";
+  $("#loadTxt").textContent="load "+(s.load?s.load.join(" / "):"—");
+  const memP=s.mem_total?Math.round(100*s.mem_used/s.mem_total):0;
+  setRing("memRing","memPct",memP);$("#memUsed").textContent=human(s.mem_used*1024);$("#memTotal").textContent="из "+human(s.mem_total*1024);
+  $("#temp").innerHTML=(s.temp_c!=null?s.temp_c:"—")+'<span class="unit"> °C</span>';
+  $("#tempBar").style.width=Math.min(100,(s.temp_c||0)/90*100)+"%";
+  $("#tempBar").style.background=(s.temp_c>75?"linear-gradient(90deg,var(--peach),var(--red))":"linear-gradient(90deg,var(--green),var(--teal))");
+  $("#uptime").textContent=dur(s.uptime);$("#fwline").textContent=s.kernel||"";
+  // system page
+  sset(s);
+}
+async function loadCpu(){const c=await api("cpu");if(!c)return;setRing("cpuRing","cpuPct",c.usage);}
+function setRing(ring,lbl,pct){pct=Math.max(0,Math.min(100,+pct||0));const r=$("#"+ring);r.style.setProperty("--p",pct);
+  r.style.setProperty("--c",pct>85?"var(--red)":pct>60?"var(--peach)":"var(--blue)");$("#"+lbl).textContent=pct+"%";}
+
+// traffic chart
+let hist=[],last=null,lastT=0;
+const cv=$("#chart"),cx=cv.getContext("2d");
+async function loadTraffic(){
+  const t=await api("traffic");if(!t)return;
+  // aggregate non-bridge phys: pick the busiest (wan-ish) by delta; sum all eth/wan
+  let rx=0,tx=0;t.ifaces.forEach(i=>{if(/^(eth|wan|wwan|usb|wlan|phy|ra|br-wan)/.test(i.name)){rx+=+i.rx;tx+=+i.tx;}});
+  if(!rx&&!tx){t.ifaces.forEach(i=>{rx+=+i.rx;tx+=+i.tx;});}
+  const now=t.t||Date.now()/1000;
+  if(last!=null){const dt=Math.max(1,now-lastT);const dn=Math.max(0,(rx-last.rx)/dt),up=Math.max(0,(tx-last.tx)/dt);
+    hist.push({dn,up});if(hist.length>60)hist.shift();
+    $("#dnNow").textContent=rate(dn);$("#upNow").textContent=rate(up);drawChart();}
+  last={rx,tx};lastT=now;$("#chIface").textContent="суммарно · трафик";
+}
+function drawChart(){
+  const w=cv.width,h=cv.height;cx.clearRect(0,0,w,h);
+  if(hist.length<2)return;
+  const max=Math.max(1,...hist.map(p=>Math.max(p.dn,p.up)));
+  const stepX=w/(hist.length-1);
+  const line=(key,col,fill)=>{cx.beginPath();hist.forEach((p,i)=>{const x=i*stepX,y=h-(p[key]/max)*(h-12)-4;i?cx.lineTo(x,y):cx.moveTo(x,y);});
+    cx.strokeStyle=col;cx.lineWidth=2;cx.stroke();
+    cx.lineTo(w,h);cx.lineTo(0,h);cx.closePath();cx.fillStyle=fill;cx.fill();};
+  line("dn",getCss("--green"),"rgba(166,227,161,.10)");
+  line("up",getCss("--blue"),"rgba(137,180,250,.10)");
+}
+function getCss(v){return getComputedStyle(document.documentElement).getPropertyValue(v).trim();}
+
+// network
+async function loadNet(){
+  const n=await api("net");if(!n)return;
+  $("#gw").textContent=n.gateway||"—";$("#dns").textContent=n.dns||"—";$("#wanlan").textContent=`${n.wan} / ${n.lan}`;
+  const tb=$("#ifTbody");tb.innerHTML="";
+  if(!n.ifaces||!n.ifaces.length){tb.innerHTML='<tr><td colspan="6" class="empty">нет данных</td></tr>';return;}
+  n.ifaces.forEach(i=>{const tr=document.createElement("tr");
+    tr.innerHTML=`<td><b>${i.name}</b>${i.speed?` <span class="muted">${i.speed}M</span>`:""}</td>
+    <td><span class="tag ${i.state==='up'?'up':'down'}">${i.state}</span></td>
+    <td class="mono">${i.ipv4||"—"}</td><td class="mono">${i.mac||"—"}</td>
+    <td>${human(i.rx)}</td><td>${human(i.tx)}</td>`;tb.appendChild(tr);});
+}
+
+// wifi
+async function loadWifi(){
+  const w=await api("wifi");const c=$("#wifiCards");c.innerHTML="";
+  if(!w||!w.radios||!w.radios.length){c.innerHTML='<div class="empty">нет Wi-Fi интерфейсов (или vendor без iw/iwinfo)</div>';return;}
+  w.radios.forEach(r=>{const d=document.createElement("div");d.className="wifi-card";
+    d.innerHTML=`<div class="ss">${r.ssid||"—"}</div>
+    <div class="muted mono">${r.iface}</div>
+    <div style="display:flex;gap:8px;margin-top:6px;flex-wrap:wrap">
+      <span class="tag info">канал ${r.channel}</span>
+      <span class="tag info">${r.mode}</span>
+      <span class="tag up">${r.clients} клиентов</span></div>`;c.appendChild(d);});
+}
+
+// clients
+async function loadClients(){
+  const k=await api("clients");const tb=$("#clTbody");tb.innerHTML="";
+  if(!k||!k.leases||!k.leases.length){tb.innerHTML='<tr><td colspan="4" class="empty">нет активных аренд</td></tr>';return;}
+  k.leases.forEach(l=>{const tr=document.createElement("tr");
+    const left=l.expiry?Math.max(0,l.expiry-Math.floor(Date.now()/1000)):0;
+    tr.innerHTML=`<td><b>${l.name==='*'?'(без имени)':l.name}</b></td><td class="mono">${l.ip}</td>
+    <td class="mono">${l.mac}</td><td>${left?dur(left):'—'}</td>`;tb.appendChild(tr);});
+}
+
+// dpi
+async function loadDpi(){
+  const d=await api("dpi");if(!d)return;
+  const yn=b=>b?'<span class="tag up">да</span>':'<span class="tag down">нет</span>';
+  $("#dpiState").innerHTML=d.installed?'<span class="tag up">активен</span>':'<span class="tag down">не настроен</span>';
+  $("#dpiYu").innerHTML=yn(d.yu);$("#dpiRed").innerHTML=yn(d.redirect);$("#dpiQuic").innerHTML=yn(d.quic);
+}
+$("#dpiRefresh").onclick=loadDpi;
+
+// system
+function sset(s){$("#sModel").textContent=s.model;$("#sBoard").textContent=s.board||"—";$("#sSoc").textContent=s.soc;
+  $("#sProf").textContent=s.profile+(s.vendor?" (vendor/immutable)":"");$("#sFw").textContent=s.firmware;
+  $("#sKernel").textContent=s.kernel;$("#sHost").textContent=s.hostname;}
+async function act(do_,extra){const body=`do=${do_}${extra?"&"+extra:""}`;
+  const r=await api("action",{method:"POST",headers:{"Content-Type":"application/x-www-form-urlencoded"},body});
+  if(r)toast(r.msg||"ok");}
+$$("[data-svc]").forEach(b=>b.onclick=()=>act("svc_restart","name="+b.dataset.svc));
+$("#wifiOn").onclick=()=>act("wifi_on");$("#wifiOff").onclick=()=>act("wifi_off");
+$("#reboot").onclick=()=>{if(confirm("Перезагрузить роутер?"))act("reboot");};
+
+// page loader
+function loadPage(p){({dash:()=>{loadSys();loadCpu();loadTraffic();},net:loadNet,wifi:loadWifi,clients:loadClients,dpi:loadDpi,system:loadSys}[p]||(()=>{}))();}
+
+// loops
+loadSys();loadCpu();loadTraffic();
+setInterval(()=>{const cur=document.querySelector(".page.on").id;if(cur==="dash"){loadTraffic();}},2000);
+setInterval(()=>{const cur=document.querySelector(".page.on").id;if(cur==="dash"){loadSys();loadCpu();}},5000);
+setInterval(()=>{const cur=document.querySelector(".page.on").id;loadPage(cur);},8000);
+</script>
+</body>
+</html>
